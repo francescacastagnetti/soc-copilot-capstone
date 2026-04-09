@@ -1,4 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { format, parseISO } from "date-fns";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
 
 function App() {
   const [alerts, setAlerts] = useState([]);
@@ -13,6 +23,7 @@ function App() {
 
     try {
       const res = await fetch("http://127.0.0.1:8000/alerts");
+
       if (!res.ok) {
         throw new Error(`Backend returned ${res.status}`);
       }
@@ -43,23 +54,61 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  const summary = useMemo(() => {
+    const uniqueUrls = new Set(alerts.map((a) => a.url).filter(Boolean)).size;
+    const uniqueSources = new Set(alerts.map((a) => a.src_ip).filter(Boolean)).size;
+    const highSeverity = alerts.filter((a) => Number(a.severity) >= 3).length;
+
+    return {
+      totalAlerts: alerts.length,
+      highSeverity,
+      uniqueUrls,
+      uniqueSources,
+    };
+  }, [alerts]);
+
+  const protocolChartData = useMemo(() => {
+    const counts = alerts.reduce((acc, alert) => {
+      const proto = alert.proto || "UNKNOWN";
+      acc[proto] = (acc[proto] || 0) + 1;
+      return acc;
+    }, {});
+
+    return Object.entries(counts).map(([proto, count]) => ({
+      proto,
+      count,
+    }));
+  }, [alerts]);
+
+  const timelineData = useMemo(() => {
+    return [...alerts].sort((a, b) => {
+      const aTime = new Date(a.timestamp || 0).getTime();
+      const bTime = new Date(b.timestamp || 0).getTime();
+      return aTime - bTime;
+    });
+  }, [alerts]);
+
   function explainAlert(alert) {
     if (!alert) return "";
 
-    const method = alert.http_method || "UNKNOWN_METHOD";
-    const host = alert.hostname || "unknown-host";
-    const url = alert.url || "/";
-    const signature = alert.signature || "Unknown alert";
     const src = alert.src_ip || "unknown source";
     const dst = alert.dest_ip || "unknown destination";
+    const sig = alert.signature || "unknown alert";
+    const method = alert.http_method || "unknown method";
+    const host = alert.hostname || "unknown host";
+    const url = alert.url || "/";
 
-    return `Traffic from ${src} to ${dst} triggered the alert "${signature}". The observed request used ${method} against ${host}${url}, which is why this event should be reviewed by the analyst.`;
+    return `Traffic from ${src} to ${dst} triggered the alert "${sig}". The observed request used ${method} against ${host}${url}. This event should be reviewed as part of the analyst investigation workflow.`;
   }
 
-  const totalAlerts = alerts.length;
-  const highSeverity = alerts.filter((a) => Number(a.severity) >= 3).length;
-  const uniqueSources = new Set(alerts.map((a) => a.src_ip).filter(Boolean)).size;
-  const uniqueDestinations = new Set(alerts.map((a) => a.dest_ip).filter(Boolean)).size;
+  function safeFormatTimestamp(timestamp, pattern = "PPpp") {
+    if (!timestamp) return "Unknown time";
+    try {
+      return format(parseISO(timestamp), pattern);
+    } catch {
+      return timestamp;
+    }
+  }
 
   if (loading && alerts.length === 0) {
     return (
@@ -76,7 +125,7 @@ function App() {
         <p>Real-time attack monitoring and AI-assisted analyst support</p>
         {lastUpdate && (
           <p style={{ fontSize: "0.9em", color: "#999", marginTop: "10px" }}>
-            Last updated: {lastUpdate.toLocaleString()}
+            Last updated: {format(lastUpdate, "PPpp")}
           </p>
         )}
       </header>
@@ -95,42 +144,59 @@ function App() {
       <div className="stats-grid">
         <div className="stat-card">
           <h3>Total Alerts</h3>
-          <div className="value">{totalAlerts}</div>
+          <div className="value">{summary.totalAlerts}</div>
         </div>
         <div className="stat-card">
-          <h3>High Severity Alerts</h3>
-          <div className="value">{highSeverity}</div>
+          <h3>High Severity</h3>
+          <div className="value">{summary.highSeverity}</div>
+        </div>
+        <div className="stat-card">
+          <h3>Unique URLs</h3>
+          <div className="value">{summary.uniqueUrls}</div>
         </div>
         <div className="stat-card">
           <h3>Unique Sources</h3>
-          <div className="value">{uniqueSources}</div>
-        </div>
-        <div className="stat-card">
-          <h3>Unique Destinations</h3>
-          <div className="value">{uniqueDestinations}</div>
+          <div className="value">{summary.uniqueSources}</div>
         </div>
       </div>
 
       <section className="section">
         <h2>Attack Timeline</h2>
         <div className="timeline">
-          {alerts.length === 0 ? (
+          {timelineData.length === 0 ? (
             <p>No alert events recorded yet</p>
           ) : (
-            alerts.map((alert) => (
+            timelineData.map((alert) => (
               <div
                 key={alert.event_id}
                 className="timeline-item"
                 onClick={() => setSelectedAlert(alert)}
                 style={{ cursor: "pointer" }}
               >
-                <span className="timeline-time">{alert.timestamp}</span>
+                <span className="timeline-time">
+                  {safeFormatTimestamp(alert.timestamp)}
+                </span>
                 <span className="timeline-event">{alert.signature}</span>
               </div>
             ))
           )}
         </div>
       </section>
+
+      {protocolChartData.length > 0 && (
+        <section className="section">
+          <h2>Protocol Distribution</h2>
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={protocolChartData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="proto" />
+              <YAxis />
+              <Tooltip />
+              <Bar dataKey="count" fill="#667eea" />
+            </BarChart>
+          </ResponsiveContainer>
+        </section>
+      )}
 
       <section className="section">
         <h2>Detected Alerts</h2>
@@ -147,7 +213,9 @@ function App() {
               >
                 <div className="event-header">
                   <span className="event-method">{alert.proto || "N/A"}</span>
-                  <span className="event-time">{alert.timestamp}</span>
+                  <span className="event-time">
+                    {safeFormatTimestamp(alert.timestamp, "HH:mm:ss")}
+                  </span>
                 </div>
 
                 <div className="event-url">{alert.signature}</div>
@@ -173,7 +241,9 @@ function App() {
               <span style={{ fontWeight: "bold", color: "#667eea" }}>
                 {selectedAlert.signature}
               </span>
-              <span className="event-time">{selectedAlert.timestamp}</span>
+              <span className="event-time">
+                {safeFormatTimestamp(selectedAlert.timestamp, "HH:mm:ss")}
+              </span>
             </div>
 
             <div className="event-meta" style={{ flexWrap: "wrap" }}>
