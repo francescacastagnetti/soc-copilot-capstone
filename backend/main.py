@@ -25,6 +25,7 @@ def load_raw_events():
     if not text:
         return []
 
+    # First try normal JSON parsing
     try:
         parsed = json.loads(text)
         if isinstance(parsed, list):
@@ -34,6 +35,7 @@ def load_raw_events():
     except json.JSONDecodeError:
         pass
 
+    # Fallback for newline-delimited JSON
     events = []
     for line in text.splitlines():
         line = line.strip()
@@ -75,6 +77,79 @@ def extract_alerts():
     return alerts
 
 
+def build_timeline():
+    alerts = extract_alerts()
+    sorted_alerts = sorted(alerts, key=lambda x: x["timestamp"] or "")
+    return [
+        {
+            "timestamp": a["timestamp"],
+            "event": a["signature"],
+            "src_ip": a["src_ip"],
+            "dest_ip": a["dest_ip"],
+            "severity": a["severity"],
+            "event_id": a["event_id"],
+        }
+        for a in sorted_alerts
+    ]
+
+
+def build_incident_story():
+    alerts = extract_alerts()
+    timeline = build_timeline()
+
+    if not alerts:
+        return {
+            "title": "No active alert story available",
+            "summary": "No alert events were found in the current dataset.",
+            "steps": [],
+            "analyst_notes": [
+                "Verify that telemetry is being ingested correctly.",
+                "Confirm that the log file contains alert events rather than only stats or metadata.",
+            ],
+        }
+
+    sorted_alerts = sorted(alerts, key=lambda x: x["timestamp"] or "")
+    first_alert = sorted_alerts[0]
+    last_alert = sorted_alerts[-1]
+
+    unique_sources = sorted({a["src_ip"] for a in alerts if a.get("src_ip")})
+    unique_dests = sorted({a["dest_ip"] for a in alerts if a.get("dest_ip")})
+    highest_severity = max([(a.get("severity") or 0) for a in alerts], default=0)
+
+    steps = []
+    for idx, item in enumerate(timeline[:6], start=1):
+        steps.append(
+            {
+                "step_number": idx,
+                "timestamp": item["timestamp"],
+                "event": item["event"],
+                "description": f'At {item["timestamp"]}, traffic from {item["src_ip"] or "unknown source"} to {item["dest_ip"] or "unknown destination"} generated the alert "{item["event"]}".',
+                "severity": item["severity"],
+            }
+        )
+
+    summary = (
+        f"The observed incident begins with alert activity at {first_alert.get('timestamp') or 'an unknown time'} "
+        f"and continues through {last_alert.get('timestamp') or 'an unknown time'}. "
+        f"There are {len(alerts)} total alert events involving {len(unique_sources)} source system(s) "
+        f"and {len(unique_dests)} destination system(s). The highest observed severity is {highest_severity}."
+    )
+
+    analyst_notes = [
+        "Review whether the same source IP appears repeatedly across the alert chain.",
+        "Check whether multiple alerts target the same destination or URL path.",
+        "Use the timeline to identify whether the alerts suggest reconnaissance, access, or follow-on activity.",
+        "Compare the raw event fields to verify whether this is a true positive or noisy traffic.",
+    ]
+
+    return {
+        "title": "Incident Story",
+        "summary": summary,
+        "steps": steps,
+        "analyst_notes": analyst_notes,
+    }
+
+
 @app.get("/")
 def root():
     return {"message": "SOC Copilot backend running"}
@@ -103,16 +178,9 @@ def get_summary():
 
 @app.get("/timeline")
 def get_timeline():
-    alerts = extract_alerts()
+    return build_timeline()
 
-    sorted_alerts = sorted(alerts, key=lambda x: x["timestamp"] or "")
 
-    return [
-        {
-            "timestamp": a["timestamp"],
-            "event": a["signature"],
-            "src_ip": a["src_ip"],
-            "dest_ip": a["dest_ip"],
-        }
-        for a in sorted_alerts
-    ]
+@app.get("/incident-story")
+def get_incident_story():
+    return build_incident_story()
