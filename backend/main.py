@@ -25,7 +25,6 @@ def load_raw_events():
     if not text:
         return []
 
-    # First try normal JSON parsing
     try:
         parsed = json.loads(text)
         if isinstance(parsed, list):
@@ -35,7 +34,6 @@ def load_raw_events():
     except json.JSONDecodeError:
         pass
 
-    # Fallback for newline-delimited JSON
     events = []
     for line in text.splitlines():
         line = line.strip()
@@ -53,9 +51,7 @@ def extract_alerts():
     alerts = []
 
     for i, event in enumerate(raw_events, start=1):
-        event_type = event.get("event_type")
-
-        if event_type != "alert":
+        if event.get("event_type") != "alert":
             continue
 
         alerts.append(
@@ -150,6 +146,119 @@ def build_incident_story():
     }
 
 
+def get_alert_by_id(event_id: str):
+    alerts = extract_alerts()
+    for alert in alerts:
+        if alert["event_id"] == event_id:
+            return alert
+    return None
+
+
+def build_related_alerts(event_id: str):
+    selected = get_alert_by_id(event_id)
+    if not selected:
+        return []
+
+    alerts = extract_alerts()
+    related = []
+
+    for alert in alerts:
+        same_source = selected.get("src_ip") and alert.get("src_ip") == selected.get("src_ip")
+        same_dest = selected.get("dest_ip") and alert.get("dest_ip") == selected.get("dest_ip")
+        same_host = (
+            selected.get("hostname")
+            and alert.get("hostname")
+            and alert.get("hostname") == selected.get("hostname")
+        )
+
+        if same_source or same_dest or same_host:
+            related.append(alert)
+
+    related = sorted(related, key=lambda x: x["timestamp"] or "")
+    return related
+
+
+def build_trace_explanation(event_id: str):
+    alert = get_alert_by_id(event_id)
+    if not alert:
+        return {"error": "Alert not found"}
+
+    src = alert.get("src_ip") or "unknown source"
+    dst = alert.get("dest_ip") or "unknown destination"
+    sig = alert.get("signature") or "unknown alert"
+    method = alert.get("http_method") or "unknown method"
+    host = alert.get("hostname") or "unknown host"
+    url = alert.get("url") or "/"
+    sev = alert.get("severity") or 0
+
+    explanation = (
+        f'TRACE determined that traffic from {src} to {dst} triggered the alert "{sig}". '
+        f"The observed request used {method} against {host}{url}. "
+        f"This event has severity {sev} and should be reviewed in the context of surrounding related activity."
+    )
+
+    evidence = [
+        f"Source IP: {src}",
+        f"Destination IP: {dst}",
+        f"Protocol: {alert.get('proto') or 'unknown'}",
+        f"Method: {method}",
+        f"Host: {host}",
+        f"URL: {url}",
+        f"Severity: {sev}",
+    ]
+
+    return {
+        "event_id": event_id,
+        "explanation": explanation,
+        "evidence": evidence,
+    }
+
+
+def build_trace_next_steps(event_id: str):
+    alert = get_alert_by_id(event_id)
+    if not alert:
+        return {"error": "Alert not found"}
+
+    steps = [
+        "Review nearby timeline events to determine what happened immediately before and after this alert.",
+        "Check for repeated activity from the same source IP.",
+        "Compare whether the same destination IP or hostname appears in multiple alerts.",
+        "Inspect the raw event fields to verify whether the alert reflects suspicious or expected traffic.",
+    ]
+
+    if alert.get("http_method"):
+        steps.append("Review the associated HTTP method and URL path for possible credential use, access attempts, or follow-on activity.")
+
+    if alert.get("severity") and alert.get("severity") >= 3:
+        steps.append("Prioritize this event for analyst attention because it is high severity.")
+
+    return {
+        "event_id": event_id,
+        "next_steps": steps,
+    }
+
+
+def build_trace_overview():
+    alerts = extract_alerts()
+    if not alerts:
+        return {
+            "trace_status": "No alerts available",
+            "priority_message": "TRACE is waiting for alert telemetry.",
+            "active_incident_count": 0,
+            "top_risk": "No risk identified",
+        }
+
+    high_count = len([a for a in alerts if (a.get("severity") or 0) >= 3])
+    top_alert = sorted(alerts, key=lambda a: (a.get("severity") or 0), reverse=True)[0]
+
+    return {
+        "trace_status": "Active monitoring",
+        "priority_message": f'TRACE recommends attention to "{top_alert.get("signature") or "unknown alert"}".',
+        "active_incident_count": len(alerts),
+        "top_risk": top_alert.get("signature") or "Unknown risk",
+    }
+
+
 @app.get("/")
 def root():
     return {"message": "SOC Copilot backend running"}
@@ -184,3 +293,23 @@ def get_timeline():
 @app.get("/incident-story")
 def get_incident_story():
     return build_incident_story()
+
+
+@app.get("/trace/overview")
+def get_trace_overview():
+    return build_trace_overview()
+
+
+@app.get("/trace/explain/{event_id}")
+def get_trace_explain(event_id: str):
+    return build_trace_explanation(event_id)
+
+
+@app.get("/trace/next-steps/{event_id}")
+def get_trace_next_steps(event_id: str):
+    return build_trace_next_steps(event_id)
+
+
+@app.get("/trace/related/{event_id}")
+def get_trace_related(event_id: str):
+    return build_related_alerts(event_id)
