@@ -18,13 +18,31 @@ DATA_FILE = BASE_DIR.parent / "sample_data" / "eve.json"
 
 
 def load_raw_events():
+    if not DATA_FILE.exists():
+        return []
+
+    text = DATA_FILE.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            return [parsed]
+    except json.JSONDecodeError:
+        pass
+
     events = []
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                events.append(json.loads(line.strip()))
-            except:
-                continue
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     return events
 
 
@@ -33,22 +51,26 @@ def extract_alerts():
     alerts = []
 
     for i, event in enumerate(raw_events, start=1):
-        if event.get("event_type") != "alert":
+        event_type = event.get("event_type")
+
+        if event_type != "alert":
             continue
 
-        alerts.append({
-            "event_id": f"evt-{i:03}",
-            "timestamp": event.get("timestamp"),
-            "src_ip": event.get("src_ip"),
-            "dest_ip": event.get("dest_ip"),
-            "proto": event.get("proto"),
-            "severity": event.get("alert", {}).get("severity"),
-            "signature": event.get("alert", {}).get("signature"),
-            "hostname": event.get("http", {}).get("hostname"),
-            "url": event.get("http", {}).get("url"),
-            "http_method": event.get("http", {}).get("http_method"),
-            "raw": event
-        })
+        alerts.append(
+            {
+                "event_id": f"evt-{i:03}",
+                "timestamp": event.get("timestamp"),
+                "src_ip": event.get("src_ip"),
+                "dest_ip": event.get("dest_ip"),
+                "proto": event.get("proto"),
+                "severity": event.get("alert", {}).get("severity"),
+                "signature": event.get("alert", {}).get("signature"),
+                "hostname": event.get("http", {}).get("hostname"),
+                "url": event.get("http", {}).get("url"),
+                "http_method": event.get("http", {}).get("http_method"),
+                "raw": event,
+            }
+        )
 
     return alerts
 
@@ -75,7 +97,7 @@ def get_summary():
         "total_alerts": len(alerts),
         "high_severity": high_severity,
         "unique_sources": unique_sources,
-        "unique_destinations": unique_dests
+        "unique_destinations": unique_dests,
     }
 
 
@@ -83,17 +105,14 @@ def get_summary():
 def get_timeline():
     alerts = extract_alerts()
 
-    sorted_alerts = sorted(
-        alerts,
-        key=lambda x: x["timestamp"] or ""
-    )
+    sorted_alerts = sorted(alerts, key=lambda x: x["timestamp"] or "")
 
     return [
         {
             "timestamp": a["timestamp"],
             "event": a["signature"],
             "src_ip": a["src_ip"],
-            "dest_ip": a["dest_ip"]
+            "dest_ip": a["dest_ip"],
         }
         for a in sorted_alerts
     ]

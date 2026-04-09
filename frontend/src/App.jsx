@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { format, parseISO } from "date-fns";
 import {
   BarChart,
@@ -12,6 +12,8 @@ import {
 
 function App() {
   const [alerts, setAlerts] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [timeline, setTimeline] = useState([]);
   const [selectedAlert, setSelectedAlert] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -22,19 +24,28 @@ function App() {
     setError(null);
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/alerts");
+      const [alertsRes, summaryRes, timelineRes] = await Promise.all([
+        fetch("http://127.0.0.1:8000/alerts"),
+        fetch("http://127.0.0.1:8000/summary"),
+        fetch("http://127.0.0.1:8000/timeline"),
+      ]);
 
-      if (!res.ok) {
-        throw new Error(`Backend returned ${res.status}`);
+      if (!alertsRes.ok || !summaryRes.ok || !timelineRes.ok) {
+        throw new Error("One or more backend routes failed");
       }
 
-      const data = await res.json();
-      setAlerts(data);
+      const alertsData = await alertsRes.json();
+      const summaryData = await summaryRes.json();
+      const timelineData = await timelineRes.json();
 
-      if (data.length > 0) {
+      setAlerts(alertsData);
+      setSummary(summaryData);
+      setTimeline(timelineData);
+
+      if (alertsData.length > 0) {
         setSelectedAlert((prev) => {
-          if (!prev) return data[0];
-          return data.find((a) => a.event_id === prev.event_id) || data[0];
+          if (!prev) return alertsData[0];
+          return alertsData.find((a) => a.event_id === prev.event_id) || alertsData[0];
         });
       } else {
         setSelectedAlert(null);
@@ -54,39 +65,24 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const summary = useMemo(() => {
-    const uniqueUrls = new Set(alerts.map((a) => a.url).filter(Boolean)).size;
-    const uniqueSources = new Set(alerts.map((a) => a.src_ip).filter(Boolean)).size;
-    const highSeverity = alerts.filter((a) => Number(a.severity) >= 3).length;
+  // 🔥 NEW: severity color function
+  function getSeverityColor(severity) {
+    if (severity >= 4) return "#ff4d4f";
+    if (severity === 3) return "#fa8c16";
+    if (severity === 2) return "#fadb14";
+    return "#52c41a";
+  }
 
-    return {
-      totalAlerts: alerts.length,
-      highSeverity,
-      uniqueUrls,
-      uniqueSources,
-    };
-  }, [alerts]);
-
-  const protocolChartData = useMemo(() => {
-    const counts = alerts.reduce((acc, alert) => {
-      const proto = alert.proto || "UNKNOWN";
-      acc[proto] = (acc[proto] || 0) + 1;
-      return acc;
-    }, {});
-
-    return Object.entries(counts).map(([proto, count]) => ({
-      proto,
-      count,
-    }));
-  }, [alerts]);
-
-  const timelineData = useMemo(() => {
-    return [...alerts].sort((a, b) => {
-      const aTime = new Date(a.timestamp || 0).getTime();
-      const bTime = new Date(b.timestamp || 0).getTime();
-      return aTime - bTime;
-    });
-  }, [alerts]);
+  const protocolChartData = alerts.reduce((acc, alert) => {
+    const proto = alert.proto || "UNKNOWN";
+    const existing = acc.find((item) => item.proto === proto);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      acc.push({ proto, count: 1 });
+    }
+    return acc;
+  }, []);
 
   function explainAlert(alert) {
     if (!alert) return "";
@@ -141,48 +137,55 @@ function App() {
         </div>
       )}
 
+      {/* STATS */}
       <div className="stats-grid">
         <div className="stat-card">
           <h3>Total Alerts</h3>
-          <div className="value">{summary.totalAlerts}</div>
+          <div className="value">{summary?.total_alerts ?? 0}</div>
         </div>
         <div className="stat-card">
           <h3>High Severity</h3>
-          <div className="value">{summary.highSeverity}</div>
-        </div>
-        <div className="stat-card">
-          <h3>Unique URLs</h3>
-          <div className="value">{summary.uniqueUrls}</div>
+          <div className="value">{summary?.high_severity ?? 0}</div>
         </div>
         <div className="stat-card">
           <h3>Unique Sources</h3>
-          <div className="value">{summary.uniqueSources}</div>
+          <div className="value">{summary?.unique_sources ?? 0}</div>
+        </div>
+        <div className="stat-card">
+          <h3>Unique Destinations</h3>
+          <div className="value">{summary?.unique_destinations ?? 0}</div>
         </div>
       </div>
 
+      {/* TIMELINE */}
       <section className="section">
         <h2>Attack Timeline</h2>
         <div className="timeline">
-          {timelineData.length === 0 ? (
-            <p>No alert events recorded yet</p>
+          {timeline.length === 0 ? (
+            <p>No timeline events recorded yet</p>
           ) : (
-            timelineData.map((alert) => (
-              <div
-                key={alert.event_id}
-                className="timeline-item"
-                onClick={() => setSelectedAlert(alert)}
-                style={{ cursor: "pointer" }}
-              >
-                <span className="timeline-time">
-                  {safeFormatTimestamp(alert.timestamp)}
-                </span>
-                <span className="timeline-event">{alert.signature}</span>
-              </div>
-            ))
+            timeline.map((item, idx) => {
+              const alertMatch = alerts.find(a => a.signature === item.event);
+              return (
+                <div
+                  key={idx}
+                  className="timeline-item"
+                  style={{
+                    borderLeft: `4px solid ${getSeverityColor(alertMatch?.severity)}`
+                  }}
+                >
+                  <span className="timeline-time">
+                    {safeFormatTimestamp(item.timestamp)}
+                  </span>
+                  <span className="timeline-event">{item.event}</span>
+                </div>
+              );
+            })
           )}
         </div>
       </section>
 
+      {/* CHART */}
       {protocolChartData.length > 0 && (
         <section className="section">
           <h2>Protocol Distribution</h2>
@@ -198,6 +201,7 @@ function App() {
         </section>
       )}
 
+      {/* ALERT LIST */}
       <section className="section">
         <h2>Detected Alerts</h2>
         <div className="events-list">
@@ -209,7 +213,10 @@ function App() {
                 key={alert.event_id}
                 className="event-item"
                 onClick={() => setSelectedAlert(alert)}
-                style={{ cursor: "pointer" }}
+                style={{
+                  cursor: "pointer",
+                  borderLeft: `5px solid ${getSeverityColor(alert.severity)}`
+                }}
               >
                 <div className="event-header">
                   <span className="event-method">{alert.proto || "N/A"}</span>
@@ -231,12 +238,18 @@ function App() {
         </div>
       </section>
 
+      {/* COPILOT */}
       <section className="section">
         <h2>Copilot Alert Analysis</h2>
         {!selectedAlert ? (
           <p>Select an alert to inspect its details.</p>
         ) : (
-          <div className="event-item" style={{ borderBottom: "none" }}>
+          <div
+            className="event-item"
+            style={{
+              border: `2px solid ${getSeverityColor(selectedAlert.severity)}`
+            }}
+          >
             <div className="event-header">
               <span style={{ fontWeight: "bold", color: "#667eea" }}>
                 {selectedAlert.signature}
@@ -247,37 +260,18 @@ function App() {
             </div>
 
             <div className="event-meta" style={{ flexWrap: "wrap" }}>
-              <span>Source IP: {selectedAlert.src_ip || "N/A"}</span>
-              <span>Destination IP: {selectedAlert.dest_ip || "N/A"}</span>
-              <span>Protocol: {selectedAlert.proto || "N/A"}</span>
-              <span>Severity: {selectedAlert.severity ?? "N/A"}</span>
-              <span>Host: {selectedAlert.hostname || "N/A"}</span>
-              <span>URL: {selectedAlert.url || "N/A"}</span>
-              <span>Method: {selectedAlert.http_method || "N/A"}</span>
+              <span>Source IP: {selectedAlert.src_ip}</span>
+              <span>Destination IP: {selectedAlert.dest_ip}</span>
+              <span>Protocol: {selectedAlert.proto}</span>
+              <span>Severity: {selectedAlert.severity}</span>
+              <span>Host: {selectedAlert.hostname}</span>
+              <span>URL: {selectedAlert.url}</span>
+              <span>Method: {selectedAlert.http_method}</span>
             </div>
 
             <div style={{ marginTop: "20px" }}>
-              <h3 style={{ marginBottom: "10px", color: "#00bfff" }}>
-                Plain-English Explanation
-              </h3>
+              <h3 style={{ color: "#00bfff" }}>Explanation</h3>
               <p>{explainAlert(selectedAlert)}</p>
-            </div>
-
-            <div style={{ marginTop: "20px" }}>
-              <h3 style={{ marginBottom: "10px", color: "#00bfff" }}>
-                Raw Event
-              </h3>
-              <pre
-                style={{
-                  background: "rgba(0,0,0,0.35)",
-                  padding: "15px",
-                  borderRadius: "10px",
-                  overflowX: "auto",
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                {JSON.stringify(selectedAlert.raw, null, 2)}
-              </pre>
             </div>
           </div>
         )}
