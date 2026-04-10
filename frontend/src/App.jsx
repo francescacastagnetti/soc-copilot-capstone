@@ -53,7 +53,8 @@ function App() {
   const [error, setError] = useState(null);
   const [lastUpdate, setLastUpdate] = useState(null);
 
-  const [searchTerm, setSearchTerm] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [appliedSearchTerm, setAppliedSearchTerm] = useState("");
   const [severityFilter, setSeverityFilter] = useState("all");
   const [protocolFilter, setProtocolFilter] = useState("all");
   const [sortBy, setSortBy] = useState("newest");
@@ -69,6 +70,19 @@ function App() {
       // Ignore localStorage errors
     }
   }, [analystNotesByEvent]);
+
+  const applySearch = () => {
+    setAppliedSearchTerm(searchInput.trim());
+  };
+
+  const clearAllFilters = () => {
+    setSearchInput("");
+    setAppliedSearchTerm("");
+    setSeverityFilter("all");
+    setProtocolFilter("all");
+    setSortBy("newest");
+    setFocusMode(false);
+  };
 
   const loadData = async () => {
     setLoading(true);
@@ -212,8 +226,8 @@ function App() {
   const filteredAlerts = useMemo(() => {
     let working = [...alerts];
 
-    if (searchTerm.trim()) {
-      const q = searchTerm.toLowerCase();
+    if (appliedSearchTerm) {
+      const q = appliedSearchTerm.toLowerCase();
       working = working.filter((alert) => {
         return [
           alert.signature,
@@ -278,7 +292,7 @@ function App() {
     return working;
   }, [
     alerts,
-    searchTerm,
+    appliedSearchTerm,
     severityFilter,
     protocolFilter,
     focusMode,
@@ -381,9 +395,10 @@ function App() {
 
   const controlsGridStyle = {
     display: "grid",
-    gridTemplateColumns: "2fr 1fr 1fr 1fr",
+    gridTemplateColumns: "2fr 1fr 1fr 1fr auto",
     gap: "15px",
     marginBottom: "20px",
+    alignItems: "stretch",
   };
 
   const inputStyle = {
@@ -469,20 +484,6 @@ function App() {
           >
             {focusMode ? "Disable Focus Mode" : "Enable Focus Mode"}
           </button>
-
-          {/* <button
-            className="refresh-button"
-            onClick={() => {
-              setSearchTerm("");
-              setSeverityFilter("all");
-              setProtocolFilter("all");
-              setSortBy("newest");
-              setFocusMode(false);
-            }}
-            style={{ marginBottom: 0 }}
-          >
-            Clear Filters
-          </button> */}
         </div>
 
         {error && (
@@ -617,9 +618,14 @@ function App() {
           <div style={controlsGridStyle}>
             <input
               type="text"
-              placeholder="Search by signature, IP, host, URL, protocol..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Enter search term..."
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  applySearch();
+                }
+              }}
               style={inputStyle}
             />
 
@@ -658,25 +664,40 @@ function App() {
               <option value="highest_severity">Highest Severity</option>
               <option value="source_ip">Source IP</option>
             </select>
+
+            <button
+              className="refresh-button"
+              onClick={applySearch}
+              style={{ marginBottom: 0, height: "100%" }}
+            >
+              Search
+            </button>
           </div>
 
           <div
             style={{
               display: "flex",
-              justifyContent: "flex-end",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: "12px",
               marginTop: "4px",
               marginBottom: "14px",
             }}
           >
+            <div style={{ color: "#999", fontSize: "0.95rem" }}>
+              {appliedSearchTerm ? (
+                <>
+                  Active search: <strong>{appliedSearchTerm}</strong>
+                </>
+              ) : (
+                "No search term applied"
+              )}
+            </div>
+
             <button
               className="refresh-button"
-              onClick={() => {
-                setSearchTerm("");
-                setSeverityFilter("all");
-                setProtocolFilter("all");
-                setSortBy("newest");
-                setFocusMode(false);
-              }}
+              onClick={clearAllFilters}
               style={{ marginBottom: 0 }}
             >
               Clear Filters
@@ -697,7 +718,8 @@ function App() {
               onClick={() => {
                 setSeverityFilter("all");
                 setProtocolFilter("all");
-                setSearchTerm("");
+                setSearchInput("");
+                setAppliedSearchTerm("");
               }}
             >
               All Alerts ({quickFilterCounts.all})
