@@ -319,25 +319,56 @@ function App() {
           <div className="stats-grid">
             <div className="stat-card">
               <h3>Status</h3>
-              <div className="value" style={{ fontSize: "1.5em" }}>
+              <div className="value" style={{ fontSize: "1.4em" }}>
                 {traceOverview.trace_status}
               </div>
             </div>
             <div className="stat-card">
               <h3>Priority</h3>
-              <div className="value" style={{ fontSize: "1.2em" }}>
-                {traceOverview.top_risk}
+              <div className="value" style={{ fontSize: "1.3em" }}>
+                {traceOverview.priority}
               </div>
             </div>
             <div className="stat-card">
-              <h3>Active Incident Count</h3>
+              <h3>Risk Category</h3>
+              <div className="value" style={{ fontSize: "1.15em" }}>
+                {traceOverview.risk_category}
+              </div>
+            </div>
+            <div className="stat-card">
+              <h3>Active Alerts</h3>
               <div className="value">{traceOverview.active_incident_count}</div>
             </div>
             <div className="stat-card">
-              <h3>TRACE Message</h3>
-              <div className="value" style={{ fontSize: "1.1em" }}>
-                {traceOverview.priority_message}
+              <h3>Most Affected Source</h3>
+              <div className="value" style={{ fontSize: "1.15em" }}>
+                {traceOverview.most_affected_source}
               </div>
+            </div>
+            <div className="stat-card">
+              <h3>Most Affected Destination</h3>
+              <div className="value" style={{ fontSize: "1.15em" }}>
+                {traceOverview.most_affected_destination}
+              </div>
+            </div>
+          </div>
+
+          <div
+            className="event-item"
+            style={{
+              marginTop: "20px",
+              borderLeft: "8px solid #00bfff",
+              background: "rgba(0, 191, 255, 0.08)",
+            }}
+          >
+            <div className="event-header">
+              <span style={{ fontWeight: "bold", color: "#00bfff" }}>
+                TRACE Guidance
+              </span>
+            </div>
+            <p>{traceOverview.priority_message}</p>
+            <div style={{ marginTop: "12px" }}>
+              <strong>Top Risk Signature:</strong> {traceOverview.top_risk}
             </div>
           </div>
         </section>

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from collections import Counter
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -227,7 +228,9 @@ def build_trace_next_steps(event_id: str):
     ]
 
     if alert.get("http_method"):
-        steps.append("Review the associated HTTP method and URL path for possible credential use, access attempts, or follow-on activity.")
+        steps.append(
+            "Review the associated HTTP method and URL path for possible credential use, access attempts, or follow-on activity."
+        )
 
     if alert.get("severity") and alert.get("severity") >= 3:
         steps.append("Prioritize this event for analyst attention because it is high severity.")
@@ -238,24 +241,97 @@ def build_trace_next_steps(event_id: str):
     }
 
 
+def classify_priority(alert):
+    severity = alert.get("severity") or 0
+    signature = (alert.get("signature") or "").lower()
+    method = (alert.get("http_method") or "").upper()
+
+    if severity >= 4:
+        return "Critical Incident"
+    if "credential" in signature or "login" in signature or method == "POST":
+        return "Credential Activity"
+    if "outbound" in signature or "exfil" in signature or "collect" in signature:
+        return "Potential Exfiltration"
+    if severity == 3:
+        return "High-Priority Alert"
+    if "scan" in signature or "probe" in signature:
+        return "Reconnaissance Activity"
+    return "Suspicious Network Activity"
+
+
+def classify_risk_category(alert):
+    signature = (alert.get("signature") or "").lower()
+    method = (alert.get("http_method") or "").upper()
+    url = (alert.get("url") or "").lower()
+
+    if "credential" in signature or "login" in signature or method == "POST":
+        return "Credential Access Risk"
+    if "outbound" in signature or "collect" in signature or "exfil" in signature:
+        return "Data Movement Risk"
+    if "scan" in signature or "probe" in signature:
+        return "Reconnaissance Risk"
+    if "dns" in signature:
+        return "DNS Activity Risk"
+    if "http" in signature or url:
+        return "Web Traffic Risk"
+    return "General Network Risk"
+
+
+def build_priority_message(alert):
+    src = alert.get("src_ip") or "unknown source"
+    dst = alert.get("dest_ip") or "unknown destination"
+    host = alert.get("hostname") or "unknown host"
+    severity = alert.get("severity") or 0
+    signature = alert.get("signature") or "unknown alert"
+
+    if severity >= 4:
+        return f"TRACE recommends immediate analyst review of traffic from {src} to {dst} because the alert severity is critical."
+    if "credential" in signature.lower() or "login" in signature.lower():
+        return f"TRACE recommends checking whether {src} attempted credential use or form submission activity involving {host}."
+    if "outbound" in signature.lower() or "collect" in signature.lower():
+        return f"TRACE recommends investigating whether {src} sent suspicious outbound traffic toward {dst} or related infrastructure."
+    return f'TRACE recommends reviewing surrounding events for {src} and {dst} to determine whether "{signature}" is isolated or part of a larger chain.'
+
+
+def get_most_common(values):
+    filtered = [v for v in values if v]
+    if not filtered:
+        return "Unknown"
+    counts = Counter(filtered)
+    return counts.most_common(1)[0][0]
+
+
 def build_trace_overview():
     alerts = extract_alerts()
     if not alerts:
         return {
             "trace_status": "No alerts available",
-            "priority_message": "TRACE is waiting for alert telemetry.",
+            "priority": "No active priority",
+            "priority_message": "TRACE is waiting for alert telemetry before assigning investigative priority.",
             "active_incident_count": 0,
             "top_risk": "No risk identified",
+            "risk_category": "No category",
+            "most_affected_source": "Unknown",
+            "most_affected_destination": "Unknown",
         }
 
-    high_count = len([a for a in alerts if (a.get("severity") or 0) >= 3])
     top_alert = sorted(alerts, key=lambda a: (a.get("severity") or 0), reverse=True)[0]
+    priority = classify_priority(top_alert)
+    priority_message = build_priority_message(top_alert)
+    risk_category = classify_risk_category(top_alert)
+
+    most_affected_source = get_most_common([a.get("src_ip") for a in alerts])
+    most_affected_destination = get_most_common([a.get("dest_ip") for a in alerts])
 
     return {
         "trace_status": "Active monitoring",
-        "priority_message": f'TRACE recommends attention to "{top_alert.get("signature") or "unknown alert"}".',
+        "priority": priority,
+        "priority_message": priority_message,
         "active_incident_count": len(alerts),
         "top_risk": top_alert.get("signature") or "Unknown risk",
+        "risk_category": risk_category,
+        "most_affected_source": most_affected_source,
+        "most_affected_destination": most_affected_destination,
     }
 
 
