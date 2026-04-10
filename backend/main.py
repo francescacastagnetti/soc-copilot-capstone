@@ -17,38 +17,64 @@ app.add_middleware(
 BASE_DIR = Path(__file__).resolve().parent
 DATA_FILE = BASE_DIR.parent / "sample_data" / "eve.json"
 
+_CACHE = {
+    "mtime": None,
+    "raw_events": [],
+    "alerts": [],
+}
+
 
 def load_raw_events():
     if not DATA_FILE.exists():
+        _CACHE["mtime"] = None
+        _CACHE["raw_events"] = []
+        _CACHE["alerts"] = []
         return []
+
+    current_mtime = DATA_FILE.stat().st_mtime
+
+    if _CACHE["mtime"] == current_mtime and _CACHE["raw_events"]:
+        return _CACHE["raw_events"]
 
     text = DATA_FILE.read_text(encoding="utf-8").strip()
     if not text:
+        _CACHE["mtime"] = current_mtime
+        _CACHE["raw_events"] = []
+        _CACHE["alerts"] = []
         return []
 
     try:
         parsed = json.loads(text)
         if isinstance(parsed, list):
-            return parsed
-        if isinstance(parsed, dict):
-            return [parsed]
+            events = parsed
+        elif isinstance(parsed, dict):
+            events = [parsed]
+        else:
+            events = []
     except json.JSONDecodeError:
-        pass
+        events = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
 
-    events = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    _CACHE["mtime"] = current_mtime
+    _CACHE["raw_events"] = events
+    _CACHE["alerts"] = []
     return events
 
 
 def extract_alerts():
     raw_events = load_raw_events()
+
+    current_mtime = _CACHE["mtime"]
+    if _CACHE["alerts"] and current_mtime is not None:
+      return _CACHE["alerts"]
+
     alerts = []
 
     for i, event in enumerate(raw_events, start=1):
@@ -71,11 +97,15 @@ def extract_alerts():
             }
         )
 
+    _CACHE["alerts"] = alerts
     return alerts
 
 
-def build_timeline():
-    alerts = extract_alerts()
+def get_alerts_data():
+    return extract_alerts()
+
+
+def build_timeline(alerts):
     sorted_alerts = sorted(alerts, key=lambda x: x["timestamp"] or "")
     return [
         {
@@ -90,9 +120,15 @@ def build_timeline():
     ]
 
 
-def build_incident_story():
-    alerts = extract_alerts()
-    timeline = build_timeline()
+def get_alert_by_id(alerts, event_id: str):
+    for alert in alerts:
+        if alert["event_id"] == event_id:
+            return alert
+    return None
+
+
+def build_incident_story(alerts):
+    timeline = build_timeline(alerts)
 
     if not alerts:
         return {
@@ -120,16 +156,24 @@ def build_incident_story():
                 "step_number": idx,
                 "timestamp": item["timestamp"],
                 "event": item["event"],
-                "description": f'At {item["timestamp"]}, traffic from {item["src_ip"] or "unknown source"} to {item["dest_ip"] or "unknown destination"} generated the alert "{item["event"]}".',
+                "event_id": item["event_id"],
+                "description": (
+                    f'At {item["timestamp"]}, traffic from '
+                    f'{item["src_ip"] or "unknown source"} to '
+                    f'{item["dest_ip"] or "unknown destination"} generated '
+                    f'the alert "{item["event"]}".'
+                ),
                 "severity": item["severity"],
             }
         )
 
     summary = (
-        f"The observed incident begins with alert activity at {first_alert.get('timestamp') or 'an unknown time'} "
-        f"and continues through {last_alert.get('timestamp') or 'an unknown time'}. "
-        f"There are {len(alerts)} total alert events involving {len(unique_sources)} source system(s) "
-        f"and {len(unique_dests)} destination system(s). The highest observed severity is {highest_severity}."
+        f'The observed incident begins with alert activity at '
+        f'{first_alert.get("timestamp") or "an unknown time"} and continues through '
+        f'{last_alert.get("timestamp") or "an unknown time"}. '
+        f"There are {len(alerts)} total alert events involving "
+        f"{len(unique_sources)} source system(s) and {len(unique_dests)} "
+        f"destination system(s). The highest observed severity is {highest_severity}."
     )
 
     analyst_notes = [
@@ -147,23 +191,17 @@ def build_incident_story():
     }
 
 
-def get_alert_by_id(event_id: str):
-    alerts = extract_alerts()
-    for alert in alerts:
-        if alert["event_id"] == event_id:
-            return alert
-    return None
-
-
-def build_related_alerts(event_id: str):
-    selected = get_alert_by_id(event_id)
+def build_related_alerts(alerts, event_id: str):
+    selected = get_alert_by_id(alerts, event_id)
     if not selected:
         return []
 
-    alerts = extract_alerts()
     related = []
 
     for alert in alerts:
+        if alert["event_id"] == event_id:
+            continue
+
         same_source = selected.get("src_ip") and alert.get("src_ip") == selected.get("src_ip")
         same_dest = selected.get("dest_ip") and alert.get("dest_ip") == selected.get("dest_ip")
         same_host = (
@@ -177,68 +215,6 @@ def build_related_alerts(event_id: str):
 
     related = sorted(related, key=lambda x: x["timestamp"] or "")
     return related
-
-
-def build_trace_explanation(event_id: str):
-    alert = get_alert_by_id(event_id)
-    if not alert:
-        return {"error": "Alert not found"}
-
-    src = alert.get("src_ip") or "unknown source"
-    dst = alert.get("dest_ip") or "unknown destination"
-    sig = alert.get("signature") or "unknown alert"
-    method = alert.get("http_method") or "unknown method"
-    host = alert.get("hostname") or "unknown host"
-    url = alert.get("url") or "/"
-    sev = alert.get("severity") or 0
-
-    explanation = (
-        f'TRACE determined that traffic from {src} to {dst} triggered the alert "{sig}". '
-        f"The observed request used {method} against {host}{url}. "
-        f"This event has severity {sev} and should be reviewed in the context of surrounding related activity."
-    )
-
-    evidence = [
-        f"Source IP: {src}",
-        f"Destination IP: {dst}",
-        f"Protocol: {alert.get('proto') or 'unknown'}",
-        f"Method: {method}",
-        f"Host: {host}",
-        f"URL: {url}",
-        f"Severity: {sev}",
-    ]
-
-    return {
-        "event_id": event_id,
-        "explanation": explanation,
-        "evidence": evidence,
-    }
-
-
-def build_trace_next_steps(event_id: str):
-    alert = get_alert_by_id(event_id)
-    if not alert:
-        return {"error": "Alert not found"}
-
-    steps = [
-        "Review nearby timeline events to determine what happened immediately before and after this alert.",
-        "Check for repeated activity from the same source IP.",
-        "Compare whether the same destination IP or hostname appears in multiple alerts.",
-        "Inspect the raw event fields to verify whether the alert reflects suspicious or expected traffic.",
-    ]
-
-    if alert.get("http_method"):
-        steps.append(
-            "Review the associated HTTP method and URL path for possible credential use, access attempts, or follow-on activity."
-        )
-
-    if alert.get("severity") and alert.get("severity") >= 3:
-        steps.append("Prioritize this event for analyst attention because it is high severity.")
-
-    return {
-        "event_id": event_id,
-        "next_steps": steps,
-    }
 
 
 def classify_priority(alert):
@@ -277,6 +253,38 @@ def classify_risk_category(alert):
     return "General Network Risk"
 
 
+def classify_confidence(alert):
+    severity = alert.get("severity") or 0
+    signature = (alert.get("signature") or "").lower()
+    method = (alert.get("http_method") or "").upper()
+    url = (alert.get("url") or "").lower()
+
+    score = 0
+
+    if severity >= 4:
+        score += 3
+    elif severity == 3:
+        score += 2
+    elif severity == 2:
+        score += 1
+
+    if method == "POST":
+        score += 1
+
+    for token in ["credential", "login", "exfil", "outbound", "scan", "probe", "collect"]:
+        if token in signature:
+            score += 1
+
+    if url:
+        score += 1
+
+    if score >= 5:
+        return "High"
+    if score >= 3:
+        return "Medium"
+    return "Moderate"
+
+
 def build_priority_message(alert):
     src = alert.get("src_ip") or "unknown source"
     dst = alert.get("dest_ip") or "unknown destination"
@@ -285,12 +293,28 @@ def build_priority_message(alert):
     signature = alert.get("signature") or "unknown alert"
 
     if severity >= 4:
-        return f"TRACE recommends immediate analyst review of traffic from {src} to {dst} because the alert severity is critical."
+        return f"TRACE flagged traffic from {src} to {dst} as the current top-priority issue because the event severity is critical."
     if "credential" in signature.lower() or "login" in signature.lower():
-        return f"TRACE recommends checking whether {src} attempted credential use or form submission activity involving {host}."
-    if "outbound" in signature.lower() or "collect" in signature.lower():
-        return f"TRACE recommends investigating whether {src} sent suspicious outbound traffic toward {dst} or related infrastructure."
+        return f"TRACE identified behavior consistent with possible authentication-related activity involving {src}, {dst}, and host {host}."
+    if "outbound" in signature.lower() or "collect" in signature.lower() or "exfil" in signature.lower():
+        return f"TRACE observed activity that may indicate suspicious outbound communication between {src} and {dst}."
     return f'TRACE recommends reviewing surrounding events for {src} and {dst} to determine whether "{signature}" is isolated or part of a larger chain.'
+
+
+def build_recommended_action(alert):
+    severity = alert.get("severity") or 0
+    signature = (alert.get("signature") or "").lower()
+    method = (alert.get("http_method") or "").upper()
+
+    if severity >= 4:
+        return "Immediately validate the alert, inspect adjacent timeline activity, and prioritize containment if the behavior is confirmed."
+    if "credential" in signature or "login" in signature or method == "POST":
+        return "Review related requests, login paths, and repeated source activity for possible credential use or submission attempts."
+    if "outbound" in signature or "exfil" in signature or "collect" in signature:
+        return "Inspect destination patterns, transferred resources, and repeated outbound activity for signs of collection or exfiltration."
+    if "scan" in signature or "probe" in signature:
+        return "Review surrounding reconnaissance indicators and determine whether the source progressed beyond discovery behavior."
+    return "Examine the raw event fields and nearby alerts to determine whether the event is benign, noisy, or part of a broader sequence."
 
 
 def get_most_common(values):
@@ -301,24 +325,27 @@ def get_most_common(values):
     return counts.most_common(1)[0][0]
 
 
-def build_trace_overview():
-    alerts = extract_alerts()
+def build_trace_overview(alerts):
     if not alerts:
         return {
             "trace_status": "No alerts available",
             "priority": "No active priority",
             "priority_message": "TRACE is waiting for alert telemetry before assigning investigative priority.",
+            "recommended_action": "Confirm that telemetry is being ingested and that alert events are present in the dataset.",
             "active_incident_count": 0,
             "top_risk": "No risk identified",
             "risk_category": "No category",
             "most_affected_source": "Unknown",
             "most_affected_destination": "Unknown",
+            "confidence": "N/A",
         }
 
     top_alert = sorted(alerts, key=lambda a: (a.get("severity") or 0), reverse=True)[0]
     priority = classify_priority(top_alert)
     priority_message = build_priority_message(top_alert)
     risk_category = classify_risk_category(top_alert)
+    recommended_action = build_recommended_action(top_alert)
+    confidence = classify_confidence(top_alert)
 
     most_affected_source = get_most_common([a.get("src_ip") for a in alerts])
     most_affected_destination = get_most_common([a.get("dest_ip") for a in alerts])
@@ -327,11 +354,79 @@ def build_trace_overview():
         "trace_status": "Active monitoring",
         "priority": priority,
         "priority_message": priority_message,
+        "recommended_action": recommended_action,
         "active_incident_count": len(alerts),
         "top_risk": top_alert.get("signature") or "Unknown risk",
         "risk_category": risk_category,
         "most_affected_source": most_affected_source,
         "most_affected_destination": most_affected_destination,
+        "confidence": confidence,
+    }
+
+
+def build_trace_explanation(alerts, event_id: str):
+    alert = get_alert_by_id(alerts, event_id)
+    if not alert:
+        return {"error": "Alert not found"}
+
+    src = alert.get("src_ip") or "unknown source"
+    dst = alert.get("dest_ip") or "unknown destination"
+    sig = alert.get("signature") or "unknown alert"
+    method = alert.get("http_method") or "unknown method"
+    host = alert.get("hostname") or "unknown host"
+    url = alert.get("url") or "/"
+    sev = alert.get("severity") or 0
+    confidence = classify_confidence(alert)
+
+    explanation = (
+        f'TRACE determined that traffic from {src} to {dst} triggered the alert "{sig}". '
+        f"The observed request used {method} against {host}{url}. "
+        f"This event has severity {sev} and should be reviewed in the context of surrounding related activity."
+    )
+
+    evidence = [
+        f"Source IP: {src}",
+        f"Destination IP: {dst}",
+        f"Protocol: {alert.get('proto') or 'unknown'}",
+        f"Method: {method}",
+        f"Host: {host}",
+        f"URL: {url}",
+        f"Severity: {sev}",
+    ]
+
+    return {
+        "event_id": event_id,
+        "explanation": explanation,
+        "evidence": evidence,
+        "confidence": confidence,
+    }
+
+
+def build_trace_next_steps(alerts, event_id: str):
+    alert = get_alert_by_id(alerts, event_id)
+    if not alert:
+        return {"error": "Alert not found"}
+
+    steps = [
+        "Review nearby timeline events to determine what happened immediately before and after this alert.",
+        "Check for repeated activity from the same source IP.",
+        "Compare whether the same destination IP or hostname appears in multiple alerts.",
+        "Inspect the raw event fields to verify whether the alert reflects suspicious or expected traffic.",
+    ]
+
+    if alert.get("http_method"):
+        steps.append(
+            "Review the associated HTTP method and URL path for possible credential use, access attempts, or follow-on activity."
+        )
+
+    if alert.get("severity") and alert.get("severity") >= 3:
+        steps.append(
+            "Prioritize this event for analyst attention because it is high severity."
+        )
+
+    return {
+        "event_id": event_id,
+        "next_steps": steps,
     }
 
 
@@ -342,12 +437,12 @@ def root():
 
 @app.get("/alerts")
 def get_alerts():
-    return extract_alerts()
+    return get_alerts_data()
 
 
 @app.get("/summary")
 def get_summary():
-    alerts = extract_alerts()
+    alerts = get_alerts_data()
 
     unique_sources = len(set(a["src_ip"] for a in alerts if a["src_ip"]))
     unique_dests = len(set(a["dest_ip"] for a in alerts if a["dest_ip"]))
@@ -363,29 +458,35 @@ def get_summary():
 
 @app.get("/timeline")
 def get_timeline():
-    return build_timeline()
+    alerts = get_alerts_data()
+    return build_timeline(alerts)
 
 
 @app.get("/incident-story")
 def get_incident_story():
-    return build_incident_story()
+    alerts = get_alerts_data()
+    return build_incident_story(alerts)
 
 
 @app.get("/trace/overview")
 def get_trace_overview():
-    return build_trace_overview()
+    alerts = get_alerts_data()
+    return build_trace_overview(alerts)
 
 
 @app.get("/trace/explain/{event_id}")
 def get_trace_explain(event_id: str):
-    return build_trace_explanation(event_id)
+    alerts = get_alerts_data()
+    return build_trace_explanation(alerts, event_id)
 
 
 @app.get("/trace/next-steps/{event_id}")
 def get_trace_next_steps(event_id: str):
-    return build_trace_next_steps(event_id)
+    alerts = get_alerts_data()
+    return build_trace_next_steps(alerts, event_id)
 
 
 @app.get("/trace/related/{event_id}")
 def get_trace_related(event_id: str):
-    return build_related_alerts(event_id)
+    alerts = get_alerts_data()
+    return build_related_alerts(alerts, event_id)
