@@ -16,56 +16,106 @@ from .scoring import (
 )
 
 
-def build_priority_message(alert, features, score, reasons):
-    src = alert.get("src_ip") or "unknown source"
-    dst = alert.get("dest_ip") or "unknown destination"
-    host = alert.get("hostname") or "unknown host"
-    phase = features.get("attack_phase", "general")
+# ---------------------------
+# 🧠 Helper: build key findings
+# ---------------------------
+def build_key_findings(features):
+    findings = []
 
-    if reasons:
-        lead = ", ".join(reasons[:3])
-    else:
-        lead = "suspicious network characteristics"
+    if features["has_login_terms"]:
+        findings.append("Credential-related activity detected")
 
-    return (
-        f"TRACE elevated traffic from {src} to {dst} involving host {host} "
-        f"because it aligns with {phase} behavior and scored {score} based on {lead}."
-    )
+    if features["has_exfil_terms"]:
+        findings.append("Potential data movement behavior observed")
+
+    if features["has_recon_terms"]:
+        findings.append("Reconnaissance-like behavior detected")
+
+    if features["repeated_source"]:
+        findings.append("Repeated activity from the same source IP")
+
+    if features["suspicious_method"]:
+        findings.append(f"Suspicious HTTP method used ({features['method']})")
+
+    if features["unusual_method"] or features["unusual_proto"]:
+        findings.append("Unusual behavior compared to dataset baseline")
+
+    return findings
 
 
-def build_recommended_action(features):
+# ---------------------------
+# 🧠 Helper: impact assessment
+# ---------------------------
+def build_impact_assessment(features):
     phase = features.get("attack_phase", "general")
 
     if phase == "credential-access":
-        return (
-            "Review authentication endpoints, repeated login-related requests, and surrounding "
-            "source activity to determine whether the behavior reflects credential use or abuse."
-        )
+        return "This activity may indicate attempted credential use or compromise risk."
 
     if phase == "exfiltration":
-        return (
-            "Inspect outbound destinations, repeated transfers, and adjacent events to determine "
-            "whether the activity reflects collection or data movement."
-        )
+        return "This behavior may indicate potential data exfiltration or unauthorized data transfer."
 
     if phase == "reconnaissance":
-        return (
-            "Review the timeline for follow-on behavior after discovery activity and determine "
-            "whether reconnaissance escalated into access attempts."
-        )
+        return "This activity may represent early-stage reconnaissance preceding further attacks."
 
-    if phase == "dns-activity":
-        return (
-            "Validate the observed DNS behavior, inspect repetition against the same host or "
-            "destination, and check whether the activity aligns with expected resolution patterns."
-        )
+    return "This activity may represent suspicious or anomalous network behavior requiring review."
 
-    return (
-        "Inspect the raw event, compare nearby alerts, and determine whether this event is isolated, "
-        "benign, or part of a broader sequence."
+
+# ---------------------------
+# 🧠 Helper: narrative explanation
+# ---------------------------
+def build_narrative(alert, features, score, reasons):
+    src = alert.get("src_ip") or "an unknown source"
+    dst = alert.get("dest_ip") or "an unknown destination"
+    sig = alert.get("signature") or "an alert"
+    phase = features.get("attack_phase", "general")
+
+    explanation = (
+        f"TRACE analysis indicates that traffic from {src} to {dst} triggered the alert \"{sig}\". "
     )
 
+    explanation += f"This activity most closely aligns with {phase.replace('-', ' ')} behavior. "
 
+    if reasons:
+        explanation += "Key contributing factors include "
+        explanation += ", ".join(reasons[:3]) + ". "
+
+    # Correlation language
+    if features["repeated_source"]:
+        explanation += "Repeated activity from the same source suggests this is not an isolated event. "
+
+    if features["concentrated_source"]:
+        explanation += "The concentration of activity from a single source increases the likelihood of coordinated behavior. "
+
+    explanation += (
+        f"Overall, TRACE assigned a score of {score}, reflecting an elevated risk associated with {phase.replace('-', ' ')} activity."
+    )
+
+    return explanation
+
+
+# ---------------------------
+# 🧠 Multi-alert correlation insight
+# ---------------------------
+def build_incident_summary(alerts, ranked):
+    if len(alerts) < 2:
+        return "The observed activity appears limited to a single alert event."
+
+    phases = [item["features"]["attack_phase"] for item in ranked]
+    unique_phases = list(set(phases))
+
+    if "credential-access" in unique_phases and "exfiltration" in unique_phases:
+        return "Observed alerts suggest a progression from credential access activity to potential outbound behavior."
+
+    if "reconnaissance" in unique_phases:
+        return "Observed alerts include reconnaissance-like activity, which may precede further attack stages."
+
+    return "Multiple alerts indicate repeated or sustained suspicious activity across the environment."
+
+
+# ---------------------------
+# 🧠 Rank alerts
+# ---------------------------
 def rank_alerts(alerts):
     profile = compute_behavior_profile(alerts)
     ranked = []
@@ -73,132 +123,80 @@ def rank_alerts(alerts):
     for alert in alerts:
         features = extract_alert_features(alert, alerts, profile)
         score, reasons = score_alert(features)
-        ranked.append(
-            {
-                "alert": alert,
-                "features": features,
-                "score": score,
-                "reasons": reasons,
-            }
-        )
 
-    ranked.sort(
-        key=lambda item: (item["score"], item["alert"].get("severity") or 0, item["alert"].get("timestamp") or ""),
-        reverse=True,
-    )
+        ranked.append({
+            "alert": alert,
+            "features": features,
+            "score": score,
+            "reasons": reasons,
+        })
+
+    ranked.sort(key=lambda x: x["score"], reverse=True)
     return ranked
 
 
+# ---------------------------
+# 🔥 TRACE OVERVIEW
+# ---------------------------
 def build_trace_overview(alerts):
     if not alerts:
         return {
             "trace_status": "No alerts available",
             "priority": "No active priority",
-            "priority_message": "TRACE is waiting for alert telemetry before assigning investigative priority.",
-            "recommended_action": "Confirm that telemetry is being ingested and that alert events are present in the dataset.",
+            "priority_message": "TRACE is waiting for alert telemetry.",
+            "recommended_action": "Ensure data ingestion is active.",
             "active_incident_count": 0,
-            "top_risk": "No risk identified",
-            "risk_category": "No category",
-            "most_affected_source": "Unknown",
-            "most_affected_destination": "Unknown",
             "confidence": "N/A",
-            "confidence_breakdown": {
-                "score": 0,
-                "drivers": [],
-                "confidence_basis": "No alert evidence available."
-            },
         }
 
     ranked = rank_alerts(alerts)
     top = ranked[0]
 
-    top_alert = top["alert"]
-    top_features = top["features"]
-    top_score = top["score"]
-    top_reasons = top["reasons"]
-
-    priority = classify_priority_from_score(top_score, top_features)
-    risk_category = classify_risk_category(top_features)
-    confidence = classify_confidence_from_score(top_score)
-    priority_message = build_priority_message(top_alert, top_features, top_score, top_reasons)
-    recommended_action = build_recommended_action(top_features)
-    confidence_breakdown = build_confidence_breakdown(top_score, top_reasons)
-
-    most_affected_source = get_most_common([a.get("src_ip") for a in alerts])
-    most_affected_destination = get_most_common([a.get("dest_ip") for a in alerts])
+    alert = top["alert"]
+    features = top["features"]
+    score = top["score"]
+    reasons = top["reasons"]
 
     return {
         "trace_status": "Active monitoring",
-        "priority": priority,
-        "priority_message": priority_message,
-        "recommended_action": recommended_action,
-        "active_incident_count": len(alerts),
-        "top_risk": top_alert.get("signature") or "Unknown risk",
-        "risk_category": risk_category,
-        "most_affected_source": most_affected_source,
-        "most_affected_destination": most_affected_destination,
-        "confidence": confidence,
-        "confidence_breakdown": confidence_breakdown,
+        "priority": classify_priority_from_score(score, features),
+        "priority_message": build_narrative(alert, features, score, reasons),
+        "recommended_action": build_impact_assessment(features),
+        "incident_summary": build_incident_summary(alerts, ranked),
+        "key_findings": build_key_findings(features),
+        "confidence": classify_confidence_from_score(score),
+        "confidence_breakdown": build_confidence_breakdown(score, reasons),
     }
 
 
+# ---------------------------
+# 🔥 TRACE EXPLAIN
+# ---------------------------
 def build_trace_explanation(alerts, event_id: str):
     alert = get_alert_by_id(alerts, event_id)
     if not alert:
         return {"error": "Alert not found"}
 
+    ranked = rank_alerts(alerts)
     profile = compute_behavior_profile(alerts)
+
     features = extract_alert_features(alert, alerts, profile)
     score, reasons = score_alert(features)
-    confidence = classify_confidence_from_score(score)
-    confidence_breakdown = build_confidence_breakdown(score, reasons)
-
-    src = alert.get("src_ip") or "unknown source"
-    dst = alert.get("dest_ip") or "unknown destination"
-    sig = alert.get("signature") or "unknown alert"
-    method = alert.get("http_method") or "unknown method"
-    host = alert.get("hostname") or "unknown host"
-    url = alert.get("url") or "/"
-    sev = alert.get("severity") or 0
-    proto = alert.get("proto") or "unknown"
-    phase = features.get("attack_phase", "general")
-
-    if reasons:
-        reason_text = ", ".join(reasons[:4])
-    else:
-        reason_text = "limited suspicious indicators"
-
-    explanation = (
-        f'TRACE determined that traffic from {src} to {dst} triggered the alert "{sig}". '
-        f"This event maps most closely to {phase} behavior, used method {method}, protocol {proto}, "
-        f"host {host}, and URL path {url}. The event severity is {sev}. "
-        f"TRACE assigned a score of {score} and confidence {confidence} based on {reason_text}."
-    )
-
-    evidence = [
-        f"Source IP: {src}",
-        f"Destination IP: {dst}",
-        f"Protocol: {proto}",
-        f"Method: {method}",
-        f"Host: {host}",
-        f"URL: {url}",
-        f"Severity: {sev}",
-        f"Attack phase: {phase}",
-        f"Repeated source count: {features['same_source_count']}",
-        f"Repeated destination count: {features['same_dest_count']}",
-        f"Repeated host count: {features['same_host_count']}",
-    ]
 
     return {
         "event_id": event_id,
-        "explanation": explanation,
-        "evidence": evidence,
-        "confidence": confidence,
-        "confidence_breakdown": confidence_breakdown,
+        "explanation": build_narrative(alert, features, score, reasons),
+        "impact_assessment": build_impact_assessment(features),
+        "key_findings": build_key_findings(features),
+        "confidence": classify_confidence_from_score(score),
+        "confidence_breakdown": build_confidence_breakdown(score, reasons),
         "score": score,
     }
 
 
+# ---------------------------
+# 🔥 NEXT STEPS
+# ---------------------------
 def build_trace_next_steps(alerts, event_id: str):
     alert = get_alert_by_id(alerts, event_id)
     if not alert:
@@ -209,34 +207,19 @@ def build_trace_next_steps(alerts, event_id: str):
     score, reasons = score_alert(features)
 
     steps = [
-        "Review nearby timeline events to determine what happened immediately before and after this alert.",
-        "Check whether the same source IP appears repeatedly across the incident chain.",
-        "Compare whether the same destination IP or hostname appears in multiple alerts.",
-        "Inspect the raw event fields to determine whether the event is benign, noisy, or part of a broader sequence.",
+        "Review surrounding timeline events for context.",
+        "Check for repeated activity from the same source IP.",
+        "Validate whether this behavior matches expected system activity.",
     ]
 
     if features["has_login_terms"]:
-        steps.append(
-            "Inspect authentication-related paths and determine whether the activity reflects suspicious login or credential use."
-        )
+        steps.append("Inspect authentication-related endpoints and credential flows.")
 
     if features["has_exfil_terms"]:
-        steps.append(
-            "Review outbound communication and transferred resources for possible collection or exfiltration behavior."
-        )
+        steps.append("Investigate outbound traffic patterns and potential data transfers.")
 
     if features["has_recon_terms"]:
-        steps.append(
-            "Determine whether the observed reconnaissance behavior was followed by access or submission activity."
-        )
-
-    if features["unusual_method"] or features["unusual_proto"] or features["unusual_host"]:
-        steps.append(
-            "Validate the anomaly signals by comparing this event against expected methods, protocols, and hostnames in the dataset."
-        )
-
-    if score >= 8:
-        steps.append("Prioritize this event for analyst attention because its combined TRACE score is elevated.")
+        steps.append("Determine whether reconnaissance activity escalated to access attempts.")
 
     return {
         "event_id": event_id,
@@ -245,5 +228,8 @@ def build_trace_next_steps(alerts, event_id: str):
     }
 
 
+# ---------------------------
+# 🔗 RELATED
+# ---------------------------
 def build_trace_related(alerts, event_id: str):
     return build_related_alerts(alerts, event_id)
